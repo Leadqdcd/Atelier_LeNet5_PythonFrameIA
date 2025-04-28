@@ -5,51 +5,49 @@ import torch
 from model import LeNet5
 
 def preprocess_digit(roi: np.ndarray, size: int = 32) -> torch.Tensor:
-    """
-    A partir d'un ROI binaire (255=chiffre, 0=fond),
-    on centre le chiffre dans un carré noir, on resize à 32×32,
-    puis on normalise [(x-0.5)/0.5] comme pendant l'entraînement.
-    """
+    # Place le ROI (255 = blanc) centré sur fond noir comme MNIST
     h, w = roi.shape
     S = max(h, w)
-    # fond noir
     square = np.zeros((S, S), dtype=np.uint8)
-    # centrer le ROI blanc
-    y_off = (S - h) // 2
-    x_off = (S - w) // 2
+    y_off, x_off = (S - h) // 2, (S - w) // 2
     square[y_off:y_off+h, x_off:x_off+w] = roi
 
-    # resize
+    # Redim + normalize → [-1,1]
     resized = cv2.resize(square, (size, size), interpolation=cv2.INTER_AREA)
     arr = resized.astype(np.float32) / 255.0
     arr = (arr - 0.5) / 0.5
     return torch.from_numpy(arr).unsqueeze(0).unsqueeze(0)
 
 def segment_and_predict(img_path: str, model: LeNet5, device: torch.device) -> str:
-    # 1) Lecture + gris + blur
+    # 1) Lecture + gris
     img = cv2.imread(img_path)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5,5), 0)
+    # Optionnel pour réduire artefacts papier
+    gray = cv2.medianBlur(gray, 3)
 
-    # 2) Seuillage inversé (chiffres blancs)
+    # 2) Seuillage inversé (chiffres blancs sur fond noir)
     _, thresh = cv2.threshold(
         gray, 0, 255,
         cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
     )
 
-    # 3) Détection des contours externes
+    # 3) Fermeture verticale pour reconnecter les traits du '2'
+    vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1,5))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, vert_kernel)
+
+    # 4) Détection des contours externes
     cnts, _ = cv2.findContours(
         thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
 
     digits = []
-    # 4) Trier de gauche à droite
-    for c in sorted(cnts, key=lambda c: cv2.boundingRect(c)[0]):
+    # 5) Trier contours de gauche à droite
+    for c in sorted(cnts, key=lambda ctr: cv2.boundingRect(ctr)[0]):
         x, y, w, h = cv2.boundingRect(c)
-        # ignorer trop petits éléments
-        if w * h < 200:  
+        # filtrer le bruit
+        if w * h < 200:
             continue
-        roi = thresh[y:y+h, x:x+w]
+        roi = thresh[y:y+h, x:x+w]  # blanc (255) sur noir (0)
         tensor = preprocess_digit(roi).to(device)
         with torch.no_grad():
             out = model(tensor)
